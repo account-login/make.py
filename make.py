@@ -54,6 +54,7 @@ normpath_cache = {}
 task_queue = queue.PriorityQueue()
 priority_queue_counter = 0 # tiebreaker counter to fall back to FIFO when rule priorities are the same
 any_errors = False
+output_dir = '_out'
 
 # This is used to work around some Python bugs:
 # 1. It would be nice if sys.stdout.write from multiple threads were atomic, but I've observed problems.
@@ -106,7 +107,7 @@ def remove_path(cwd, path):
     except (PermissionError, IsADirectoryError):
         if os.path.isdir(path):
             # Check that the path is within the relevant _out directory
-            out_dir = '%s/_out/' % os.path.realpath(cwd)
+            out_dir = joinpath(os.path.realpath(cwd), output_dir)
             if os.path.realpath(path).startswith(out_dir):
                 shutil.rmtree(path)
             else:
@@ -221,8 +222,10 @@ class BuildContext:
         if not isinstance(vars, dict):
             vars = dict(var.split('=', 1) for var in vars)
         self.vars = vars
+        self._rule_added = False
 
     def add_rule(self, targets, deps, cmds, d_file=None, order_only_deps=[], msvc_show_includes=False, stdout_filter=None, latency=1):
+        self._rule_added = True
         cwd = self.cwd
         if not isinstance(targets, list):
             assert isinstance(targets, str) # we expect targets to be either a str (a single target) or a list of targets
@@ -245,6 +248,13 @@ class BuildContext:
                 print("ERROR: multiple ways to build target '%s'" % t)
                 exit(1)
             rules[t] = rule
+
+    def set_output_dir(self, path):
+        global output_dir
+        if self._rule_added and output_dir != path:
+            print("ERROR: please set_output_dir() before add_rule()")
+            exit(1)
+        output_dir = path
 
 def parse_d_file(d_file):
     with io_lock:
@@ -344,20 +354,21 @@ def parse_rules_py(ctx, options, pathname, visited):
         rules_py_module = imp.load_module('rules%d' % len(visited), file, pathname, description)
 
     dir = os.path.dirname(pathname)
-    if dir not in make_db:
-        make_db[dir] = {}
-        path = '%s/_out/make.db' % dir
-        if os.path.exists(path):
-            with open(path) as f:
-                for line in f:
-                    (target, signature) = line.rstrip().rsplit(' ', 1)
-                    make_db[dir][target] = signature
     if hasattr(rules_py_module, 'submakes'):
         for f in rules_py_module.submakes():
             parse_rules_py(ctx, options, normpath(joinpath(dir, f)), visited)
     ctx.cwd = dir
     if hasattr(rules_py_module, 'rules'):
         rules_py_module.rules(ctx)
+
+    if dir not in make_db:
+        make_db[dir] = {}
+        path = '%s/make.db' % joinpath(dir, output_dir)
+        if os.path.exists(path):
+            with open(path) as f:
+                for line in f:
+                    (target, signature) = line.rstrip().rsplit(' ', 1)
+                    make_db[dir][target] = signature
 
 # returns width-1 for interactive console, or None if stdout is redirected
 def get_usable_columns():
@@ -432,7 +443,7 @@ def main():
     # Clean up stale targets from previous builds that no longer have rules; also do an explicitly requested clean
     for (cwd, db) in make_db.items():
         if options.clean:
-            dir = '%s/_out' % cwd
+            dir = joinpath(cwd, output_dir)
             if os.path.exists(dir):
                 stdout_write("Cleaning '%s'...\n" % dir)
                 shutil.rmtree(dir)
@@ -498,9 +509,10 @@ def main():
         # XXX May want to do this "occasionally" as the build is running?  (not too often to avoid a perf hit, but often
         # enough to avoid data loss)
         for (cwd, db) in make_db.items():
-            if not os.path.exists('%s/_out' % cwd):
-                os.mkdir('%s/_out' % cwd)
-            with open('%s/_out/make.db' % cwd, 'w') as f:
+            out_dir = joinpath(cwd, output_dir)
+            if not os.path.exists(out_dir):
+                os.makedirs(out_dir)
+            with open('%s/make.db' % out_dir, 'w') as f:
                 for (target, signature) in db.items():
                     f.write('%s %s\n' % (target, signature))
 
