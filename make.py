@@ -124,15 +124,25 @@ def run_cmd(rule, options):
         if t in local_make_db:
             del local_make_db[t]
 
-    built_text = "Built '%s'.\n" % "'\n  and '".join(rule.targets)
+    building_text = "Building '%s'.\n" % "'\n  and '".join(rule.targets)
     if progress_line: # need to precede "Built [...]" with erasing the current progress indicator
-        built_text = '\r%s\r%s' % (' ' * usable_columns, built_text)
+        building_text = '\r%s\r%s' % (' ' * usable_columns, building_text)
+    stdout_write(building_text)
 
-    all_out = []
     for cmd in rule.cmds:
         # Run command, capture/filter its output, and get its exit code.
         # XXX Do we want to add an additional check that all the targets must exist?
+
+        if os.name == 'nt':
+            cmd_text = subprocess.list2cmdline(cmd)
+        else:
+            cmd_text = ' '.join(pipes.quote(x) for x in cmd)
+
         with io_lock:
+            if options.verbose:
+                sys.stdout.write(' Running %s\n' % cmd_text)
+                sys.stdout.flush()
+
             try:
                 p = subprocess.Popen(cmd, cwd=rule.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             except Exception as e:
@@ -172,28 +182,26 @@ def run_cmd(rule, options):
             r = re.compile(rule.stdout_filter)
             out = '\n'.join(line for line in out.splitlines() if not r.match(line))
 
-        if options.verbose or code:
-            if os.name == 'nt':
-                out = '%s\n%s' % (subprocess.list2cmdline(cmd), out)
-            else:
-                out = '%s\n%s' % (' '.join(pipes.quote(x) for x in cmd), out)
-            out = out.rstrip()
+        if code:
+            out = '  Failed %s\n    Code %d\n%s\n' % (cmd_text, code, out)
+        elif options.verbose:
+            out = '    Done %s\n%s\n' % (cmd_text, out)
+        if out[-2:] == '\n\n':
+            # Remove duplicated new line
+            out = out[:-1]
+
         if out:
-            all_out.append(out)
+            stdout_write(out)
+
         if code:
             global any_errors
             any_errors = True
-            stdout_write("%s%s\n\n" % (built_text, '\n'.join(all_out)))
             for t in rule.targets:
                 remove_path(rule.cwd, t)
             exit(1)
 
     for t in rule.targets:
         local_make_db[t] = rule.signature()
-    if all_out:
-        stdout_write('%s%s\n\n' % (built_text, '\n'.join(all_out)))
-    elif not progress_line:
-        stdout_write(built_text)
 
 class Rule:
     def __init__(self, targets, deps, cwd, cmds, d_file, order_only_deps, msvc_show_includes, stdout_filter, latency):
@@ -348,7 +356,7 @@ def parse_rules_py(ctx, options, pathname, visited):
         return
     visited.add(pathname)
     if options.verbose:
-        print("Parsing '%s'..." % pathname)
+        print(" Parsing '%s'..." % pathname)
     description = ('.py', 'U', imp.PY_SOURCE)
     with open(pathname, 'r') as file:
         rules_py_module = imp.load_module('rules%d' % len(visited), file, pathname, description)
