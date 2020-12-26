@@ -71,6 +71,19 @@ def stdout_write(x):
         sys.stdout.write(x)
         sys.stdout.flush()
 
+COLOR_CLEAR = '\x1b[0m'
+COLOR_LIGHT_RED = '\x1b[91m'
+COLOR_LIGHT_GREEN = '\x1b[92m'
+COLOR_LIGHT_YELLOW = '\x1b[93m'
+COLOR_HIGHLIGHT = '\x1b[97m'
+
+if os.isatty(1):
+    def colorful(text, color):
+        return color + text + COLOR_CLEAR
+else:
+    def colorful(text, color):
+        return text
+
 # By querying both a file's existence and its timestamp in a single syscall, we can get
 # a significant speedup, especially for network file systems.
 def get_timestamp_if_exists(path):
@@ -124,7 +137,7 @@ def run_cmd(rule, options):
         if t in local_make_db:
             del local_make_db[t]
 
-    building_text = "Building '%s'.\n" % "'\n  and '".join(rule.targets)
+    building_text = "%s '%s'.\n" % (colorful('Building', COLOR_HIGHLIGHT), "'\n  and '".join(rule.targets))
     if progress_line: # need to precede "Built [...]" with erasing the current progress indicator
         building_text = '\r%s\r%s' % (' ' * usable_columns, building_text)
     stdout_write(building_text)
@@ -140,7 +153,7 @@ def run_cmd(rule, options):
 
         with io_lock:
             if options.verbose:
-                sys.stdout.write(' Running %s\n' % cmd_text)
+                sys.stdout.write(' %s %s\n' % (colorful('Running', COLOR_LIGHT_YELLOW), cmd_text))
                 sys.stdout.flush()
 
             try:
@@ -183,9 +196,12 @@ def run_cmd(rule, options):
             out = '\n'.join(line for line in out.splitlines() if not r.match(line))
 
         if code:
-            out = '  Failed %s\n    Code %d\n%s\n' % (cmd_text, code, out)
+            out = '  %s %s\n    %s %d\n%s\n' % (
+                colorful('Failed', COLOR_LIGHT_RED), cmd_text,
+                colorful('Code', COLOR_LIGHT_RED), code, out,
+            )
         elif options.verbose:
-            out = '    Done %s\n%s\n' % (cmd_text, out)
+            out = '    %s %s\n%s\n' % (colorful('Done', COLOR_LIGHT_GREEN), cmd_text, out)
         if out[-2:] == '\n\n':
             # Remove duplicated new line
             out = out[:-1]
@@ -356,7 +372,7 @@ def parse_rules_py(ctx, options, pathname, visited):
         return
     visited.add(pathname)
     if options.verbose:
-        print(" Parsing '%s'..." % pathname)
+        print(" %s '%s'..." % (colorful('Parsing', COLOR_HIGHLIGHT), pathname))
     description = ('.py', 'U', imp.PY_SOURCE)
     with open(pathname, 'r') as file:
         rules_py_module = imp.load_module('rules%d' % len(visited), file, pathname, description)
@@ -453,7 +469,7 @@ def main():
         if options.clean:
             dir = joinpath(cwd, output_dir)
             if os.path.exists(dir):
-                stdout_write("Cleaning '%s'...\n" % dir)
+                stdout_write("%s '%s'...\n" % (colorful('Cleaning', COLOR_HIGHLIGHT), dir))
                 shutil.rmtree(dir)
             db.clear()
         for (target, signature) in list(db.items()):
