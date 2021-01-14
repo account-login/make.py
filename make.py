@@ -137,7 +137,7 @@ def run_cmd(rule, options):
         if t in local_make_db:
             del local_make_db[t]
 
-    building_text = "%s '%s'.\n" % (colorful('Building', COLOR_HIGHLIGHT), "'\n  and '".join(rule.targets))
+    building_text = "%s '%s'.\n" % (colorful('Building', COLOR_HIGHLIGHT), "'\n     and '".join(rule.targets))
     if progress_line: # need to precede "Built [...]" with erasing the current progress indicator
         building_text = '\r%s\r%s' % (' ' * usable_columns, building_text)
     stdout_write(building_text)
