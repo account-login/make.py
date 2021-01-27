@@ -20,6 +20,7 @@
 # OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import errno
+import functools
 import hashlib
 import itertools
 import multiprocessing
@@ -55,6 +56,8 @@ task_queue = queue.PriorityQueue()
 priority_queue_counter = 0 # tiebreaker counter to fall back to FIFO when rule priorities are the same
 any_errors = False
 output_dir = '_out'
+status_sema = threading.Semaphore(1)    # 1 extra value for the initial wait
+ts_cache = {}
 
 # This is used to work around some Python bugs:
 # 1. It would be nice if sys.stdout.write from multiple threads were atomic, but I've observed problems.
@@ -87,8 +90,11 @@ else:
 # By querying both a file's existence and its timestamp in a single syscall, we can get
 # a significant speedup, especially for network file systems.
 def get_timestamp_if_exists(path):
+    if path in ts_cache:
+        return ts_cache[path]
     try:
-        return os.stat(path).st_mtime
+        ts = ts_cache[path] = os.stat(path).st_mtime
+        return ts
     except OSError as e:
         if e.errno == errno.ENOENT:
             return -1
@@ -212,12 +218,18 @@ def run_cmd(rule, options):
         if code:
             global any_errors
             any_errors = True
+            status_update()
             for t in rule.targets:
                 remove_path(rule.cwd, t)
             exit(1)
 
     for t in rule.targets:
         local_make_db[t] = rule.signature()
+        # Clear ts cache
+        try:
+            del ts_cache[normpath(joinpath(rule.cwd, t))]
+        except KeyError:
+            pass
 
 class Rule:
     def __init__(self, targets, deps, cwd, cmds, d_file, order_only_deps, msvc_show_includes, stdout_filter, latency):
@@ -292,12 +304,27 @@ def parse_d_file(d_file):
     d_file_deps = [x for x in d_file_deps if not x.endswith(':')]
     return d_file_deps
 
+@functools.lru_cache(maxsize=None)
+def get_d_file_deps(rule):
+    d_file_deps = []
+    if rule.d_file and os.path.exists(rule.d_file):
+        d_file_deps = parse_d_file(rule.d_file)
+    return [normpath(joinpath(rule.cwd, x)) for x in d_file_deps]
+
+# For `any_errors' and `completed'
+def status_update():
+    status_sema.release()
+
+def status_wait():
+    status_sema.acquire(timeout=0.1)    # in case of bug, wait with a timeout
+
 def build(target, options):
     if target in visited or target in completed:
         return
     if target not in rules:
         visited.add(target)
         completed.add(target)
+        status_update()
         return
     rule = rules[target]
     visited.update(rule.targets)
@@ -306,10 +333,7 @@ def build(target, options):
 
     # Recursively handle the dependencies, including .d file dependencies and order-only deps
     deps = [normpath(joinpath(rule.cwd, x)) for x in rule.deps]
-    d_file_deps = []
-    if rule.d_file and os.path.exists(rule.d_file):
-        d_file_deps = parse_d_file(rule.d_file)
-        d_file_deps = [normpath(joinpath(rule.cwd, x)) for x in d_file_deps]
+    d_file_deps = get_d_file_deps(rule)
     for dep in itertools.chain(deps, d_file_deps, rule.order_only_deps):
         build(dep, options)
     if any(dep not in completed for dep in itertools.chain(deps, d_file_deps, rule.order_only_deps)):
@@ -328,11 +352,13 @@ def build(target, options):
                 stdout_write("ERROR: dependency '%s' of '%s' is nonexistent\n" % (dep, ' '.join(rule.targets)))
             global any_errors
             any_errors = True
+            status_update()
             exit(1)
     if target_timestamp >= 0 and all(dep_timestamp <= target_timestamp for dep_timestamp in dep_timestamps):
         if all(0 <= get_timestamp_if_exists(dep) <= target_timestamp for dep in d_file_deps):
             if all(make_db[rule.cwd].get(t) == rule.signature() for t in rule.targets):
                 completed.add(target)
+                status_update()
                 return
 
     # Create the directories that the targets are going to live in, if they don't already exist
@@ -351,6 +377,7 @@ def build(target, options):
         # Build the target immediately
         run_cmd(rule, options)
         completed.update(rule.targets)
+        status_update()
 
 class BuilderThread(threading.Thread):
     def __init__(self, options):
@@ -366,6 +393,7 @@ class BuilderThread(threading.Thread):
             run_cmd(rule, self.options)
             building.difference_update(rule.targets)
             completed.update(rule.targets)
+            status_update()
 
 def parse_rules_py(ctx, options, pathname, visited):
     if pathname in visited:
@@ -497,7 +525,9 @@ def main():
                 for target in args:
                     build(target, options)
 
-                # Show progress update and exit if done, otherwise sleep to prevent burning 100% of CPU
+                status_wait()
+
+                # Show progress update and exit if done
                 # Be careful about iterating over data structures being edited concurrently by the BuilderThreads
                 if any_errors:
                     break
@@ -517,7 +547,6 @@ def main():
                     stdout_write('\r%s' % progress)
                 if all(target in completed for target in args):
                     break
-                time.sleep(0.1)
         else:
             for target in args:
                 build(target, options)
